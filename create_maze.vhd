@@ -1,0 +1,888 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+--============================================================================
+-- create_maze : motore di gioco (maze + fisica pallina + rendering + HUD)
+--
+-- LAYOUT 640x480 (nessuna sovrapposizione tra elementi):
+--   y =   0.. 15 : titolo "UNGABUNGA" (centrato orizzontalmente)
+--   y =  32.. 47 : timer "TIME: XX"  (centrato orizzontalmente)
+--   y =  48..378 : labirinto (max 331 px, dipende dal livello)
+--   y = 384..478 : riquadro parametri fisici (basso-destra, x=428..636)
+--
+-- CONTROLLO PALLINA:
+--   acc_x / acc_y provengono dal driver MPU6050 (accelerometro).
+--   Il joystick NON e' collegato a questo modulo: e' usato solo dalla FSM
+--   esterna per la navigazione nei menu'.
+--
+-- TARGET (raggiungibilita' verificata cella per cella):
+--   EASY   (8,  1) -> OK
+--   MEDIUM (18, 1) -> OK
+--   HARD   (35, 1) -> OK  ((38,1) sarebbe in una tasca sigillata)
+--============================================================================
+entity create_maze is
+    generic(
+        SYS_CLK_FREQ : integer := 100_000_000;
+        TILT_THRESH  : integer := 4000
+    );
+    port(
+        clk            : in    std_logic;
+        rst            : in    std_logic;
+        game_state     : in    std_logic_vector(1 downto 0);
+        level_select   : in    std_logic_vector(1 downto 0);
+        physics_mode   : in    std_logic_vector(1 downto 0);
+        colorblind     : in    std_logic;
+        ball_enable    : in    std_logic;
+        ball_reset     : in    std_logic;
+        acc_x          : in    signed(15 downto 0);
+        acc_y          : in    signed(15 downto 0);
+        timer_secs     : in    integer range 0 to 99;
+        winner         : in    std_logic;
+        level_won      : out   std_logic;
+        hdmi_clk_p     : out   std_logic;
+        hdmi_clk_n     : out   std_logic;
+        hdmi_d_p       : out   std_logic_vector(2 downto 0);
+        hdmi_d_n       : out   std_logic_vector(2 downto 0);
+        hdmi_scl       : inout std_logic;
+        hdmi_sda       : inout std_logic;
+        hdmi_hpd       : in    std_logic
+    );
+end entity;
+
+architecture rtl of create_maze is
+
+    constant GS_IDLE    : std_logic_vector(1 downto 0) := "00";
+    constant GS_LEVEL   : std_logic_vector(1 downto 0) := "01";
+    constant GS_PLAYING : std_logic_vector(1 downto 0) := "10";
+    constant GS_RESULT  : std_logic_vector(1 downto 0) := "11";
+
+    -- Layout
+    constant HUD_TOP_H    : integer := 48;   -- fascia titolo+timer
+    constant MAZE_Y_START : integer := 48;   -- inizio labirinto
+    -- Riquadro parametri fisici (basso-destra, sotto il labirinto)
+    constant PHY_X1 : integer := 428;
+    constant PHY_X2 : integer := 636;
+    constant PHY_Y1 : integer := 384;
+    constant PHY_Y2 : integer := 478;
+
+    ------------------------------------------------------------------
+    -- Labirinti
+    ------------------------------------------------------------------
+    type maze_easy_t   is array(0 to  7) of std_logic_vector( 0 to  9);
+    type maze_medium_t is array(0 to 14) of std_logic_vector( 0 to 19);
+    type maze_hard_t   is array(0 to 29) of std_logic_vector( 0 to 39);
+
+    function gen_easy return maze_easy_t is
+        variable m : maze_easy_t;
+    begin
+        m(0) := "1111111111";
+        m(1) := "1000001001";
+        m(2) := "1011101011";
+        m(3) := "1000101011";
+        m(4) := "1010100011";
+        m(5) := "1110001011";
+        m(6) := "1111111111";
+        m(7) := "1111111111";
+        return m;
+    end function;
+
+    function gen_medium return maze_medium_t is
+        variable m : maze_medium_t;
+    begin
+        for y in 0 to 14 loop
+            for x in 0 to 19 loop
+                m(y)(x) := '0';
+            end loop;
+        end loop;
+        for x in 0 to 19 loop
+            m(0)(x) := '1'; m(14)(x) := '1';
+        end loop;
+        for y in 0 to 14 loop
+            m(y)(0) := '1'; m(y)(19) := '1';
+        end loop;
+        for y in 3 to 12 loop
+            if y mod 3 = 0 then
+                for x in 1 to 18 loop
+                    if (x mod 4) /= 0 then
+                        m(y)(x) := '1';
+                    end if;
+                end loop;
+            end if;
+        end loop;
+        for x in 6 to 12 loop
+            if x mod 6 = 0 then
+                for y in 1 to 13 loop
+                    if (y mod 4) /= 0 then
+                        m(y)(x) := '1';
+                    end if;
+                end loop;
+            end if;
+        end loop;
+        return m;
+    end function;
+
+    function gen_hard return maze_hard_t is
+        variable m : maze_hard_t;
+    begin
+        for y in 0 to 29 loop
+            for x in 0 to 39 loop
+                m(y)(x) := '0';
+            end loop;
+        end loop;
+        for x in 0 to 39 loop
+            m(0)(x) := '1'; m(29)(x) := '1';
+        end loop;
+        for y in 0 to 29 loop
+            m(y)(0) := '1'; m(y)(39) := '1';
+        end loop;
+        for y in 3 to 27 loop
+            if y mod 3 = 0 then
+                for x in 1 to 38 loop
+                    if (x mod 4) /= 0 then
+                        m(y)(x) := '1';
+                    end if;
+                end loop;
+            end if;
+        end loop;
+        for x in 6 to 36 loop
+            if x mod 6 = 0 then
+                for y in 1 to 28 loop
+                    if (y mod 4) /= 0 then
+                        m(y)(x) := '1';
+                    end if;
+                end loop;
+            end if;
+        end loop;
+        return m;
+    end function;
+
+    constant EASY_M   : maze_easy_t   := gen_easy;
+    constant MEDIUM_M : maze_medium_t := gen_medium;
+    constant HARD_M   : maze_hard_t   := gen_hard;
+
+    ------------------------------------------------------------------
+    -- Font 8x8
+    ------------------------------------------------------------------
+    type font_row_t is array(0 to 7) of std_logic_vector(7 downto 0);
+    type font_t     is array(0 to 39) of font_row_t;
+
+    constant CH_SPACE : integer := 0;
+    constant CH_0     : integer := 1;
+    constant CH_A     : integer := 11;
+    constant CH_COLON : integer := 37;
+    constant CH_DOT   : integer := 38;
+    constant CH_DASH  : integer := 39;
+
+    constant FONT : font_t := (
+        (x"00",x"00",x"00",x"00",x"00",x"00",x"00",x"00"),
+        (x"3C",x"66",x"6E",x"76",x"66",x"66",x"3C",x"00"),
+        (x"18",x"38",x"18",x"18",x"18",x"18",x"7E",x"00"),
+        (x"3C",x"66",x"06",x"0C",x"18",x"30",x"7E",x"00"),
+        (x"3C",x"66",x"06",x"1C",x"06",x"66",x"3C",x"00"),
+        (x"0C",x"1C",x"3C",x"6C",x"7E",x"0C",x"0C",x"00"),
+        (x"7E",x"60",x"7C",x"06",x"06",x"66",x"3C",x"00"),
+        (x"1C",x"30",x"60",x"7C",x"66",x"66",x"3C",x"00"),
+        (x"7E",x"06",x"0C",x"18",x"30",x"30",x"30",x"00"),
+        (x"3C",x"66",x"66",x"3C",x"66",x"66",x"3C",x"00"),
+        (x"3C",x"66",x"66",x"3E",x"06",x"0C",x"38",x"00"),
+        (x"18",x"3C",x"66",x"66",x"7E",x"66",x"66",x"00"),
+        (x"7C",x"66",x"66",x"7C",x"66",x"66",x"7C",x"00"),
+        (x"3C",x"66",x"60",x"60",x"60",x"66",x"3C",x"00"),
+        (x"78",x"6C",x"66",x"66",x"66",x"6C",x"78",x"00"),
+        (x"7E",x"60",x"60",x"7C",x"60",x"60",x"7E",x"00"),
+        (x"7E",x"60",x"60",x"7C",x"60",x"60",x"60",x"00"),
+        (x"3C",x"66",x"60",x"6E",x"66",x"66",x"3C",x"00"),
+        (x"66",x"66",x"66",x"7E",x"66",x"66",x"66",x"00"),
+        (x"3C",x"18",x"18",x"18",x"18",x"18",x"3C",x"00"),
+        (x"1E",x"0C",x"0C",x"0C",x"0C",x"6C",x"38",x"00"),
+        (x"66",x"6C",x"78",x"70",x"78",x"6C",x"66",x"00"),
+        (x"60",x"60",x"60",x"60",x"60",x"60",x"7E",x"00"),
+        (x"63",x"77",x"7F",x"6B",x"63",x"63",x"63",x"00"),
+        (x"66",x"76",x"7E",x"7E",x"6E",x"66",x"66",x"00"),
+        (x"3C",x"66",x"66",x"66",x"66",x"66",x"3C",x"00"),
+        (x"7C",x"66",x"66",x"7C",x"60",x"60",x"60",x"00"),
+        (x"3C",x"66",x"66",x"66",x"66",x"3C",x"06",x"00"),
+        (x"7C",x"66",x"66",x"7C",x"6C",x"66",x"66",x"00"),
+        (x"3C",x"66",x"60",x"3C",x"06",x"66",x"3C",x"00"),
+        (x"7E",x"18",x"18",x"18",x"18",x"18",x"18",x"00"),
+        (x"66",x"66",x"66",x"66",x"66",x"66",x"3C",x"00"),
+        (x"66",x"66",x"66",x"66",x"66",x"3C",x"18",x"00"),
+        (x"63",x"63",x"63",x"6B",x"7F",x"77",x"63",x"00"),
+        (x"66",x"66",x"3C",x"18",x"3C",x"66",x"66",x"00"),
+        (x"66",x"66",x"66",x"3C",x"18",x"18",x"18",x"00"),
+        (x"7E",x"06",x"0C",x"18",x"30",x"60",x"7E",x"00"),
+        (x"00",x"18",x"18",x"00",x"18",x"18",x"00",x"00"),
+        (x"00",x"00",x"00",x"00",x"00",x"18",x"18",x"00"),
+        (x"00",x"00",x"00",x"7E",x"00",x"00",x"00",x"00")
+    );
+
+    ------------------------------------------------------------------
+    -- Video
+    ------------------------------------------------------------------
+    signal pixel_x          : integer range 0 to 639;
+    signal pixel_y          : integer range 0 to 479;
+    signal video_on         : std_logic;
+    signal pix_r, pix_g, pix_b : std_logic_vector(3 downto 0);
+
+    ------------------------------------------------------------------
+    -- Parametri per livello
+    --   EASY   : cella 64x41, 10x8  -> labirinto 640x328 (y=48..375)
+    --   MEDIUM : cella 32x22, 20x15 -> labirinto 640x330 (y=48..377)
+    --   HARD   : cella 16x11, 40x30 -> labirinto 640x330 (y=48..377)
+    ------------------------------------------------------------------
+    signal cur_cell_w : integer range 8 to 64 := 64;
+    signal cur_cell_h : integer range 8 to 60 := 41;
+    signal cur_cols   : integer range 8 to 40 := 10;
+    signal cur_rows   : integer range 8 to 30 := 8;
+    signal ball_r     : integer range 2 to 10 := 8;
+
+    signal target_cx : integer range 0 to 40 := 8;
+    signal target_cy : integer range 0 to 30 := 1;
+    signal target_px : integer range 0 to 639 := 544;
+    signal target_py : integer range 0 to 479 := 109;
+    signal target_r  : integer range 3 to 16 := 12;
+
+    signal level_won_int : std_logic := '0';
+
+    ------------------------------------------------------------------
+    -- Pallina
+    ------------------------------------------------------------------
+    signal ball_x  : integer range 0 to 639 := 96;
+    signal ball_y  : integer range 0 to 479 := 109;
+    signal ball_vx : integer range -4 to 4  := 0;
+    signal ball_vy : integer range -4 to 4  := 0;
+    signal ball_ax : integer range -1 to 1  := 0;
+    signal ball_ay : integer range -1 to 1  := 0;
+
+    ------------------------------------------------------------------
+    -- Tick movimento 100 Hz, blink 1 Hz
+    ------------------------------------------------------------------
+    constant MOVE_INTERVAL  : integer := SYS_CLK_FREQ / 100;
+    signal move_cnt  : integer range 0 to MOVE_INTERVAL-1 := 0;
+    signal move_tick : std_logic := '0';
+
+    constant BLINK_INTERVAL : integer := SYS_CLK_FREQ / 2;
+    signal blink_cnt : integer range 0 to BLINK_INTERVAL-1 := 0;
+    signal blink_on  : std_logic := '1';
+
+begin
+
+    level_won <= level_won_int;
+
+    ------------------------------------------------------------------
+    -- Controller HDMI
+    ------------------------------------------------------------------
+    hdmi_inst : entity work.hdmi_adv7511
+        generic map(
+            H_VISIBLE => 640, H_FRONT => 16, H_SYNC => 96, H_BACK => 48,
+            V_VISIBLE => 480, V_FRONT => 10, V_SYNC => 2,  V_BACK => 33
+        )
+        port map(
+            clk => clk, rst => rst,
+            pix_r => pix_r, pix_g => pix_g, pix_b => pix_b,
+            hdmi_clk_p => hdmi_clk_p, hdmi_clk_n => hdmi_clk_n,
+            hdmi_d_p   => hdmi_d_p,   hdmi_d_n   => hdmi_d_n,
+            hdmi_scl => hdmi_scl, hdmi_sda => hdmi_sda, hdmi_hpd => hdmi_hpd,
+            hsync_out => open, vsync_out => open,
+            video_on_out => video_on,
+            pixel_x_out  => pixel_x,
+            pixel_y_out  => pixel_y
+        );
+
+    ------------------------------------------------------------------
+    -- Tick 100 Hz
+    ------------------------------------------------------------------
+    process(clk, rst)
+    begin
+        if rst = '1' then
+            move_cnt <= 0; move_tick <= '0';
+        elsif rising_edge(clk) then
+            if move_cnt = MOVE_INTERVAL-1 then
+                move_cnt <= 0; move_tick <= '1';
+            else
+                move_cnt <= move_cnt + 1; move_tick <= '0';
+            end if;
+        end if;
+    end process;
+
+    ------------------------------------------------------------------
+    -- Blink 1 Hz
+    ------------------------------------------------------------------
+    process(clk, rst)
+    begin
+        if rst = '1' then
+            blink_cnt <= 0; blink_on <= '1';
+        elsif rising_edge(clk) then
+            if blink_cnt = BLINK_INTERVAL-1 then
+                blink_cnt <= 0; blink_on <= not blink_on;
+            else
+                blink_cnt <= blink_cnt + 1;
+            end if;
+        end if;
+    end process;
+
+    ------------------------------------------------------------------
+    -- Parametri per livello + target
+    ------------------------------------------------------------------
+    process(clk, rst)
+    begin
+        if rst = '1' then
+            cur_cell_w <= 64; cur_cell_h <= 41;
+            cur_cols <= 10; cur_rows <= 8; ball_r <= 8;
+            target_cx <= 8;  target_cy <= 1; target_r <= 12;
+        elsif rising_edge(clk) then
+            case level_select is
+                when "00" =>  -- EASY
+                    cur_cell_w <= 64; cur_cell_h <= 41;
+                    cur_cols <= 10; cur_rows <= 8; ball_r <= 8;
+                    target_cx <= 8;  target_cy <= 1; target_r <= 12;
+                when "01" =>  -- MEDIUM
+                    cur_cell_w <= 32; cur_cell_h <= 22;
+                    cur_cols <= 20; cur_rows <= 15; ball_r <= 6;
+                    target_cx <= 18; target_cy <= 1; target_r <= 8;
+                when "10" =>  -- HARD
+                    cur_cell_w <= 16; cur_cell_h <= 11;
+                    cur_cols <= 40; cur_rows <= 30; ball_r <= 4;
+                    target_cx <= 35; target_cy <= 1; target_r <= 5;
+                when others => null;
+            end case;
+        end if;
+    end process;
+
+    -- Posizione target in pixel
+    target_px <= target_cx * cur_cell_w + cur_cell_w/2;
+    target_py <= MAZE_Y_START + target_cy * cur_cell_h + cur_cell_h/2;
+
+    ------------------------------------------------------------------
+    -- Fisica pallina
+    ------------------------------------------------------------------
+    process(clk, rst)
+        variable ax_in, ay_in   : integer range -1 to 1;
+        variable new_vx, new_vy : integer range -8 to 8;
+        variable nx, ny         : integer range -20 to 700;
+        variable hit            : boolean;
+        variable cxi, cyi       : integer;
+        variable wall           : std_logic;
+    begin
+        if rst = '1' then
+            ball_x  <= 96; ball_y <= MAZE_Y_START + 61;
+            ball_vx <= 0;  ball_vy <= 0;
+            ball_ax <= 0;  ball_ay <= 0;
+        elsif rising_edge(clk) then
+
+            if ball_reset = '1' then
+                case level_select is
+                    when "00" =>
+                        ball_x <= 1*64 + 32;                       -- 96
+                        ball_y <= MAZE_Y_START + 1*41 + 20;        -- 109
+                    when "01" =>
+                        ball_x <= 1*32 + 16;                       -- 48
+                        ball_y <= MAZE_Y_START + 1*22 + 11;        -- 81
+                    when "10" =>
+                        ball_x <= 1*16 + 8;                        -- 24
+                        ball_y <= MAZE_Y_START + 1*11 + 5;         -- 64
+                    when others => null;
+                end case;
+                ball_vx <= 0; ball_vy <= 0;
+                ball_ax <= 0; ball_ay <= 0;
+
+            elsif ball_enable = '1' and move_tick = '1'
+                  and level_won_int = '0' then
+
+                -- Lettura tilt dal MPU6050 (accelerometro).
+                ax_in := 0; ay_in := 0;
+                if to_integer(acc_x) >  TILT_THRESH then ax_in :=  1; end if;
+                if to_integer(acc_x) < -TILT_THRESH then ax_in := -1; end if;
+                if to_integer(acc_y) >  TILT_THRESH then ay_in :=  1; end if;
+                if to_integer(acc_y) < -TILT_THRESH then ay_in := -1; end if;
+
+                ball_ax <= ax_in;
+                ball_ay <= ay_in;
+
+                new_vx := ball_vx + ax_in;
+                new_vy := ball_vy + ay_in;
+                new_vx := new_vx - (new_vx / 4);
+                new_vy := new_vy - (new_vy / 4);
+                if new_vx >  4 then new_vx :=  4; end if;
+                if new_vx < -4 then new_vx := -4; end if;
+                if new_vy >  4 then new_vy :=  4; end if;
+                if new_vy < -4 then new_vy := -4; end if;
+
+                ball_vx <= new_vx;
+                ball_vy <= new_vy;
+
+                if new_vx /= 0 or new_vy /= 0 then
+                    nx := ball_x + new_vx;
+                    ny := ball_y + new_vy;
+
+                    -- Limiti schermo
+                    if nx < ball_r then nx := ball_r; end if;
+                    if nx > 639-ball_r then nx := 639-ball_r; end if;
+                    if ny < MAZE_Y_START + ball_r then
+                        ny := MAZE_Y_START + ball_r;
+                    end if;
+                    if ny > 479-ball_r then ny := 479-ball_r; end if;
+
+                    hit := false;
+
+                    -- NW
+                    cxi := (nx-ball_r) / cur_cell_w;
+                    cyi := (ny-ball_r-MAZE_Y_START) / cur_cell_h;
+                    wall := '1';
+                    if cyi >= 0 and cyi < cur_rows and cxi >= 0 and cxi < cur_cols then
+                        case level_select is
+                            when "00"   => wall := EASY_M(cyi)(cxi);
+                            when "01"   => wall := MEDIUM_M(cyi)(cxi);
+                            when others => wall := HARD_M(cyi)(cxi);
+                        end case;
+                    end if;
+                    if wall = '1' then hit := true; end if;
+
+                    -- NE
+                    cxi := (nx+ball_r) / cur_cell_w;
+                    cyi := (ny-ball_r-MAZE_Y_START) / cur_cell_h;
+                    wall := '1';
+                    if cyi >= 0 and cyi < cur_rows and cxi >= 0 and cxi < cur_cols then
+                        case level_select is
+                            when "00"   => wall := EASY_M(cyi)(cxi);
+                            when "01"   => wall := MEDIUM_M(cyi)(cxi);
+                            when others => wall := HARD_M(cyi)(cxi);
+                        end case;
+                    end if;
+                    if wall = '1' then hit := true; end if;
+
+                    -- SW
+                    cxi := (nx-ball_r) / cur_cell_w;
+                    cyi := (ny+ball_r-MAZE_Y_START) / cur_cell_h;
+                    wall := '1';
+                    if cyi >= 0 and cyi < cur_rows and cxi >= 0 and cxi < cur_cols then
+                        case level_select is
+                            when "00"   => wall := EASY_M(cyi)(cxi);
+                            when "01"   => wall := MEDIUM_M(cyi)(cxi);
+                            when others => wall := HARD_M(cyi)(cxi);
+                        end case;
+                    end if;
+                    if wall = '1' then hit := true; end if;
+
+                    -- SE
+                    cxi := (nx+ball_r) / cur_cell_w;
+                    cyi := (ny+ball_r-MAZE_Y_START) / cur_cell_h;
+                    wall := '1';
+                    if cyi >= 0 and cyi < cur_rows and cxi >= 0 and cxi < cur_cols then
+                        case level_select is
+                            when "00"   => wall := EASY_M(cyi)(cxi);
+                            when "01"   => wall := MEDIUM_M(cyi)(cxi);
+                            when others => wall := HARD_M(cyi)(cxi);
+                        end case;
+                    end if;
+                    if wall = '1' then hit := true; end if;
+
+                    if not hit then
+                        ball_x <= nx;
+                        ball_y <= ny;
+                    else
+                        ball_vx <= 0;
+                        ball_vy <= 0;
+                    end if;
+                end if;
+            end if;
+        end if;
+    end process;
+
+    ------------------------------------------------------------------
+    -- Rilevamento vittoria (latch)
+    ------------------------------------------------------------------
+    process(clk, rst)
+        variable dx, dy : integer;
+    begin
+        if rst = '1' then
+            level_won_int <= '0';
+        elsif rising_edge(clk) then
+            if ball_reset = '1' or game_state /= GS_PLAYING then
+                level_won_int <= '0';
+            elsif level_won_int = '0' then
+                dx := ball_x - target_px;
+                dy := ball_y - target_py;
+                if (dx*dx + dy*dy) <= ((target_r + ball_r) * (target_r + ball_r)) then
+                    level_won_int <= '1';
+                end if;
+            end if;
+        end if;
+    end process;
+
+    ------------------------------------------------------------------
+    -- Rendering combinazionale
+    ------------------------------------------------------------------
+    render_proc : process(video_on, pixel_x, pixel_y,
+                          game_state, level_select, physics_mode, colorblind,
+                          blink_on,
+                          ball_x, ball_y, ball_r, ball_vx, ball_vy,
+                          ball_ax, ball_ay, timer_secs, winner,
+                          cur_cell_w, cur_cell_h, cur_cols, cur_rows,
+                          target_px, target_py, target_r)
+        variable ccol, crow, scol, srow : integer;
+        variable ch        : integer range 0 to 39;
+        variable bmp_row   : std_logic_vector(7 downto 0);
+        variable pix_bit   : std_logic;
+        variable use_text  : boolean;
+        variable cxi, cyi  : integer;
+        variable wall      : std_logic;
+        variable dx, dy    : integer;
+        variable is_ball   : boolean;
+        variable is_target : boolean;
+        variable in_phy_box : boolean;
+        variable disp_x    : integer range 0 to 999;
+        variable disp_y    : integer range 0 to 999;
+        variable disp_sign_x : std_logic;
+        variable disp_sign_y : std_logic;
+    begin
+        -- Sfondo di default
+        if colorblind = '1' then
+            pix_r <= "0010"; pix_g <= "0010"; pix_b <= "0010";
+        else
+            pix_r <= "0000"; pix_g <= "0000"; pix_b <= "0100";
+        end if;
+
+        ch       := CH_SPACE;
+        use_text := false;
+        in_phy_box := false;
+
+        if video_on = '1' then
+            ccol := pixel_x / 16;
+            crow := pixel_y / 16;
+            scol := (pixel_x mod 16) / 2;
+            srow := (pixel_y mod 16) / 2;
+
+            ----------------------------------------------------------
+            -- LABIRINTO + PALLINA + TARGET
+            -- Disegnato solo nell'area del labirinto (y=48..378).
+            -- Nessuna sovrapposizione con titolo/timer (y<48)
+            -- ne' con il riquadro fisico (y>=384).
+            ----------------------------------------------------------
+            if pixel_y >= MAZE_Y_START and pixel_y < 384
+               and game_state = GS_PLAYING then
+
+                cxi := pixel_x / cur_cell_w;
+                cyi := (pixel_y - MAZE_Y_START) / cur_cell_h;
+
+                -- Muro solo se la cella esiste
+                if cyi >= 0 and cyi < cur_rows and cxi >= 0 and cxi < cur_cols then
+                    case level_select is
+                        when "00"   => wall := EASY_M(cyi)(cxi);
+                        when "01"   => wall := MEDIUM_M(cyi)(cxi);
+                        when others => wall := HARD_M(cyi)(cxi);
+                    end case;
+                    if wall = '1' then
+                        if colorblind = '1' then
+                            pix_r <= "0000"; pix_g <= "0000"; pix_b <= "1111";
+                        else
+                            pix_r <= "1111"; pix_g <= "1111"; pix_b <= "1111";
+                        end if;
+                    end if;
+                end if;
+
+                -- Pallina (sovrascrive)
+                dx := pixel_x - ball_x;
+                dy := pixel_y - ball_y;
+                is_ball := (dx*dx + dy*dy) <= (ball_r*ball_r);
+
+                -- Target (sovrascrive)
+                dx := pixel_x - target_px;
+                dy := pixel_y - target_py;
+                is_target := (dx*dx + dy*dy) <= (target_r*target_r);
+
+                if is_ball then
+                    pix_r <= "1111"; pix_g <= "1111"; pix_b <= "0000";
+                elsif is_target then
+                    if colorblind = '1' then
+                        pix_r <= "0000"; pix_g <= "1111"; pix_b <= "1111";
+                    else
+                        pix_r <= "0000"; pix_g <= "1111"; pix_b <= "0000";
+                    end if;
+                end if;
+            end if;
+
+            ----------------------------------------------------------
+            -- RIQUADRO PARAMETRI FISICI (sotto il labirinto)
+            -- y = 384..478, x = 428..636
+            ----------------------------------------------------------
+            if game_state = GS_PLAYING and
+               pixel_x >= PHY_X1 and pixel_x <= PHY_X2 and
+               pixel_y >= PHY_Y1 and pixel_y <= PHY_Y2 then
+                in_phy_box := true;
+                -- Bordo bianco (3 px)
+                if pixel_x <= PHY_X1+2 or pixel_x >= PHY_X2-2 or
+                   pixel_y <= PHY_Y1+2 or pixel_y >= PHY_Y2-2 then
+                    pix_r <= "1111"; pix_g <= "1111"; pix_b <= "1111";
+                else
+                    -- Sfondo blu scuro
+                    pix_r <= "0000"; pix_g <= "0000"; pix_b <= "1000";
+                end if;
+            end if;
+
+            ----------------------------------------------------------
+            -- HUD: titolo + timer (y < 48)
+            ----------------------------------------------------------
+            if pixel_y < HUD_TOP_H and game_state /= GS_IDLE
+                                          and game_state /= GS_LEVEL then
+                -- Titolo "UNGABUNGA" (riga 0)
+                if crow = 0 then
+                    case ccol is
+                        when 15 => ch := CH_A + 20;  -- U
+                        when 16 => ch := CH_A + 13;  -- N
+                        when 17 => ch := CH_A +  6;  -- G
+                        when 18 => ch := CH_A +  0;  -- A
+                        when 19 => ch := CH_A +  1;  -- B
+                        when 20 => ch := CH_A + 20;  -- U
+                        when 21 => ch := CH_A + 13;  -- N
+                        when 22 => ch := CH_A +  6;  -- G
+                        when 23 => ch := CH_A +  0;  -- A
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+
+                -- Timer "TIME: XX" (riga 2)
+                if crow = 2 then
+                    case ccol is
+                        when 16 => ch := CH_A + 19;  -- T
+                        when 17 => ch := CH_A +  8;  -- I
+                        when 18 => ch := CH_A + 12;  -- M
+                        when 19 => ch := CH_A +  4;  -- E
+                        when 20 => ch := CH_COLON;
+                        when 21 => ch := CH_SPACE;
+                        when 22 => ch := CH_0 + ((timer_secs/10) mod 10);
+                        when 23 => ch := CH_0 + (timer_secs mod 10);
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+            end if;
+
+            ----------------------------------------------------------
+            -- Testo dentro il riquadro fisico
+            -- Righe 25, 26, 27 (y = 400..447) per stare dentro il box
+            ----------------------------------------------------------
+            if in_phy_box then
+                if crow = 25 then
+                    case ccol is
+                        when 28 =>
+                            case physics_mode is
+                                when "00"   => ch := CH_A + 15;  -- P
+                                when "01"   => ch := CH_A + 21;  -- V
+                                when others => ch := CH_A +  0;  -- A
+                            end case;
+                        when 29 =>
+                            case physics_mode is
+                                when "00"   => ch := CH_A + 14;  -- O
+                                when "01"   => ch := CH_A +  4;  -- E
+                                when others => ch := CH_A +  2;  -- C
+                            end case;
+                        when 30 =>
+                            case physics_mode is
+                                when "00"   => ch := CH_A + 18;  -- S
+                                when "01"   => ch := CH_A + 11;  -- L
+                                when others => ch := CH_A +  2;  -- C
+                            end case;
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+
+                if crow = 26 then
+                    case physics_mode is
+                        when "00" => disp_x := ball_x;  disp_y := ball_y;
+                                     disp_sign_x := '0'; disp_sign_y := '0';
+                        when "01" =>
+                            if ball_vx < 0 then
+                                disp_x := -ball_vx; disp_sign_x := '1';
+                            else disp_x := ball_vx; disp_sign_x := '0'; end if;
+                            if ball_vy < 0 then
+                                disp_y := -ball_vy; disp_sign_y := '1';
+                            else disp_y := ball_vy; disp_sign_y := '0'; end if;
+                        when others =>
+                            if ball_ax < 0 then
+                                disp_x := -ball_ax; disp_sign_x := '1';
+                            else disp_x := ball_ax; disp_sign_x := '0'; end if;
+                            if ball_ay < 0 then
+                                disp_y := -ball_ay; disp_sign_y := '1';
+                            else disp_y := ball_ay; disp_sign_y := '0'; end if;
+                    end case;
+
+                    case ccol is
+                        when 28 => ch := CH_A + 23;  -- X
+                        when 29 => ch := CH_COLON;
+                        when 30 => if disp_sign_x='1' then ch := CH_DASH; else ch := CH_SPACE; end if;
+                        when 31 => ch := CH_0 + ((disp_x/100) mod 10);
+                        when 32 => ch := CH_0 + ((disp_x/10) mod 10);
+                        when 33 => ch := CH_0 + (disp_x mod 10);
+                        when 35 => ch := CH_A + 24;  -- Y
+                        when 36 => ch := CH_COLON;
+                        when 37 => if disp_sign_y='1' then ch := CH_DASH; else ch := CH_SPACE; end if;
+                        when 38 => ch := CH_0 + ((disp_y/10) mod 10);
+                        when 39 => ch := CH_0 + (disp_y mod 10);
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+
+                if crow = 27 and level_won_int = '1' then
+                    case ccol is
+                        when 28 => ch := CH_A + 22;  -- W
+                        when 29 => ch := CH_A +  8;  -- I
+                        when 30 => ch := CH_A + 13;  -- N
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+            end if;
+
+            ----------------------------------------------------------
+            -- Schermate IDLE / LEVEL / RESULT (testo centrato)
+            ----------------------------------------------------------
+            if game_state = GS_IDLE then
+                if crow = 8 then
+                    case ccol is
+                        when 15 => ch := CH_A + 12; when 16 => ch := CH_A +  0;
+                        when 17 => ch := CH_A + 25; when 18 => ch := CH_A +  4;
+                        when 20 => ch := CH_A +  6; when 21 => ch := CH_A +  0;
+                        when 22 => ch := CH_A + 12; when 23 => ch := CH_A +  4;
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+                if crow = 14 and blink_on = '1' then
+                    case ccol is
+                        when 14 => ch := CH_A + 15; when 15 => ch := CH_A + 17;
+                        when 16 => ch := CH_A +  4; when 17 => ch := CH_A + 18;
+                        when 18 => ch := CH_A + 18; when 20 => ch := CH_A + 18;
+                        when 21 => ch := CH_A + 19; when 22 => ch := CH_A +  0;
+                        when 23 => ch := CH_A + 17; when 24 => ch := CH_A + 19;
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+                if crow = 20 then
+                    case ccol is
+                        when 14 => ch := CH_A + 15; when 15 => ch := CH_A +  7;
+                        when 16 => ch := CH_A + 24; when 17 => ch := CH_A + 18;
+                        when 18 => ch := CH_COLON;
+                        when 20 =>
+                            case physics_mode is
+                                when "00"   => ch := CH_A + 15;
+                                when "01"   => ch := CH_A + 21;
+                                when others => ch := CH_A +  0;
+                            end case;
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+            end if;
+
+            if game_state = GS_LEVEL then
+                if crow = 3 then
+                    case ccol is
+                        when 14 => ch := CH_A + 18; when 15 => ch := CH_A +  4;
+                        when 16 => ch := CH_A + 11; when 17 => ch := CH_A +  4;
+                        when 18 => ch := CH_A +  2; when 19 => ch := CH_A + 19;
+                        when 21 => ch := CH_A + 11; when 22 => ch := CH_A +  4;
+                        when 23 => ch := CH_A + 21; when 24 => ch := CH_A +  4;
+                        when 25 => ch := CH_A + 11;
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+                if crow = 8 then
+                    case ccol is
+                        when 10 => if level_select="00" then ch:=CH_COLON; else ch:=CH_SPACE; end if;
+                        when 12 => ch := CH_A +  4; when 13 => ch := CH_A +  0;
+                        when 14 => ch := CH_A + 18; when 15 => ch := CH_A + 24;
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+                if crow = 12 then
+                    case ccol is
+                        when 10 => if level_select="01" then ch:=CH_COLON; else ch:=CH_SPACE; end if;
+                        when 12 => ch := CH_A + 12; when 13 => ch := CH_A +  4;
+                        when 14 => ch := CH_A +  3; when 15 => ch := CH_A +  8;
+                        when 16 => ch := CH_A + 20; when 17 => ch := CH_A + 12;
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+                if crow = 16 then
+                    case ccol is
+                        when 10 => if level_select="10" then ch:=CH_COLON; else ch:=CH_SPACE; end if;
+                        when 12 => ch := CH_A +  7; when 13 => ch := CH_A +  0;
+                        when 14 => ch := CH_A + 17; when 15 => ch := CH_A +  3;
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+                if crow = 22 and blink_on = '1' then
+                    case ccol is
+                        when 14 => ch := CH_A + 15; when 15 => ch := CH_A + 17;
+                        when 16 => ch := CH_A +  4; when 17 => ch := CH_A + 18;
+                        when 18 => ch := CH_A + 18; when 20 => ch := CH_A + 18;
+                        when 21 => ch := CH_A + 19; when 22 => ch := CH_A +  0;
+                        when 23 => ch := CH_A + 17; when 24 => ch := CH_A + 19;
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+            end if;
+
+            if game_state = GS_RESULT then
+                if crow = 8 then
+                    if winner = '1' then
+                        case ccol is
+                            when 16 => ch := CH_A + 24;
+                            when 17 => ch := CH_A + 14;
+                            when 18 => ch := CH_A + 20;
+                            when 20 => ch := CH_A + 22;
+                            when 21 => ch := CH_A + 8;
+                            when 22 => ch := CH_A + 13;
+                            when others => ch := CH_SPACE;
+                        end case;
+                    else
+                        case ccol is
+                            when 15 => ch := CH_A +  6; when 16 => ch := CH_A +  0;
+                            when 17 => ch := CH_A + 12; when 18 => ch := CH_A +  4;
+                            when 20 => ch := CH_A + 14; when 21 => ch := CH_A + 21;
+                            when 22 => ch := CH_A +  4; when 23 => ch := CH_A + 17;
+                            when others => ch := CH_SPACE;
+                        end case;
+                    end if;
+                    use_text := true;
+                end if;
+                if crow = 14 and blink_on = '1' then
+                    case ccol is
+                        when 14 => ch := CH_A + 15; when 15 => ch := CH_A + 17;
+                        when 16 => ch := CH_A +  4; when 17 => ch := CH_A + 18;
+                        when 18 => ch := CH_A + 18; when 20 => ch := CH_A + 18;
+                        when 21 => ch := CH_A + 19; when 22 => ch := CH_A +  0;
+                        when 23 => ch := CH_A + 17; when 24 => ch := CH_A + 19;
+                        when others => ch := CH_SPACE;
+                    end case;
+                    use_text := true;
+                end if;
+            end if;
+
+            -- Applica testo sopra tutto
+            if use_text and ch /= CH_SPACE then
+                bmp_row := FONT(ch, srow);
+                pix_bit := bmp_row(7 - scol);
+                if pix_bit = '1' then
+                    if colorblind = '1' then
+                        pix_r <= "0000"; pix_g <= "1111"; pix_b <= "0000";
+                    else
+                        pix_r <= "1111"; pix_g <= "1111"; pix_b <= "1111";
+                    end if;
+                end if;
+            end if;
+        end if;
+    end process;
+
+end architecture;
