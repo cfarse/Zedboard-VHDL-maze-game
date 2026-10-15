@@ -1,0 +1,22 @@
+# Vivado temporary and run files 
+*.log 
+*.jou 
+*.pb
+*.wdb
+*.str 
+.Xil/
+*.runs/
+*.sim/
+*.hw/
+*.ip\_user\_files/
+*.cache/ \*.gen/ 
+
+# Vivado HLS
+*.o
+*.d 
+
+# OS / Editor temporary files 
+.DS\_Store 
+Thumbs.db 
+.vscode/ 
+.idea/
