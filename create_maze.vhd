@@ -40,13 +40,15 @@ entity create_maze is
         timer_secs     : in    integer range 0 to 99;
         winner         : in    std_logic;
         level_won      : out   std_logic;
-        hdmi_clk_p     : out   std_logic;
-        hdmi_clk_n     : out   std_logic;
-        hdmi_d_p       : out   std_logic_vector(2 downto 0);
-        hdmi_d_n       : out   std_logic_vector(2 downto 0);
+        hdmi_clk     : out   std_logic;
+        hdmi_de       : out   std_logic;
+        hdmi_hsync     : out std_logic;
+        hdmi_vsync     : out std_logic;
+        hdmi_data      : out std_logic_vector(15 downto 0);
         hdmi_scl       : inout std_logic;
         hdmi_sda       : inout std_logic;
-        hdmi_hpd       : in    std_logic
+        hdmi_hpd       : in    std_logic;
+        sensor_fault  : in std_logic
     );
 end entity;
 
@@ -254,6 +256,7 @@ architecture rtl of create_maze is
     signal ball_vy : integer range -4 to 4  := 0;
     signal ball_ax : integer range -1 to 1  := 0;
     signal ball_ay : integer range -1 to 1  := 0;
+    signal v_cap   : integer range 1 to 4 := 3;
 
     ------------------------------------------------------------------
     -- Tick movimento 100 Hz, blink 1 Hz
@@ -281,10 +284,13 @@ begin
         port map(
             clk => clk, rst => rst,
             pix_r => pix_r, pix_g => pix_g, pix_b => pix_b,
-            hdmi_clk_p => hdmi_clk_p, hdmi_clk_n => hdmi_clk_n,
-            hdmi_d_p   => hdmi_d_p,   hdmi_d_n   => hdmi_d_n,
-            hdmi_scl => hdmi_scl, hdmi_sda => hdmi_sda, hdmi_hpd => hdmi_hpd,
-            hsync_out => open, vsync_out => open,
+            hdmi_clk => hdmi_clk,
+            hdmi_de   => hdmi_de,
+            hdmi_hsync => hdmi_hsync,
+            hdmi_vsync => hdmi_vsync,
+            hdmi_scl => hdmi_scl, 
+            hdmi_sda => hdmi_sda, 
+            hdmi_hpd => hdmi_hpd,
             video_on_out => video_on,
             pixel_x_out  => pixel_x,
             pixel_y_out  => pixel_y
@@ -337,14 +343,17 @@ begin
                     cur_cell_w <= 64; cur_cell_h <= 41;
                     cur_cols <= 10; cur_rows <= 8; ball_r <= 8;
                     target_cx <= 8;  target_cy <= 1; target_r <= 12;
+                    v_cap <= 3;
                 when "01" =>  -- MEDIUM
                     cur_cell_w <= 32; cur_cell_h <= 22;
                     cur_cols <= 20; cur_rows <= 15; ball_r <= 6;
                     target_cx <= 18; target_cy <= 1; target_r <= 8;
+                    v_cap <= 2;
                 when "10" =>  -- HARD
                     cur_cell_w <= 16; cur_cell_h <= 11;
                     cur_cols <= 40; cur_rows <= 30; ball_r <= 4;
                     target_cx <= 35; target_cy <= 1; target_r <= 5;
+                    v_cap <= 1;
                 when others => null;
             end case;
         end if;
@@ -404,10 +413,10 @@ begin
                 new_vy := ball_vy + ay_in;
                 new_vx := new_vx - (new_vx / 4);
                 new_vy := new_vy - (new_vy / 4);
-                if new_vx >  4 then new_vx :=  4; end if;
-                if new_vx < -4 then new_vx := -4; end if;
-                if new_vy >  4 then new_vy :=  4; end if;
-                if new_vy < -4 then new_vy := -4; end if;
+                if new_vx >  v_cap then new_vx :=  v_cap; end if;
+                if new_vx < v_cap then new_vx := v_cap; end if;
+                if new_vy >  v_cap then new_vy :=  v_cap; end if;
+                if new_vy < v_cap then new_vy := v_cap; end if;
 
                 ball_vx <= new_vx;
                 ball_vy <= new_vy;
@@ -520,7 +529,8 @@ begin
                           ball_x, ball_y, ball_r, ball_vx, ball_vy,
                           ball_ax, ball_ay, timer_secs, winner,
                           cur_cell_w, cur_cell_h, cur_cols, cur_rows,
-                          target_px, target_py, target_r)
+                          target_px, target_py, target_r, 
+                          sensor_fault)
         variable ccol, crow, scol, srow : integer;
         variable ch        : integer range 0 to 39;
         variable bmp_row   : std_logic_vector(7 downto 0);
@@ -869,6 +879,38 @@ begin
                     use_text := true;
                 end if;
             end if;
+
+            if sensor_fault = '1' and video_on = '1' then
+                if pixel_x >= 160 and pixel_x <= 479 and
+                   pixel_y >= 200 and pixel_y <= 279 then
+                    if pixel_x <= 162 or pixel_x >= 477 or
+                       pixel_y <= 202 or pixel_y >= 277 then
+                        pix_r <= "1111"; pix_g <= "1111"; pix_b <= "1111";
+                    else
+                        pix_r <= "1000"; pix_g <= "0000"; pix_b <= "0000";
+                    end if;
+                end if;
+            end if;
+
+            if sensor_fault = '1' and crow = 16 then
+                case ccol is
+                    when 14 => ch := CH_A + 18;
+                    when 15 => ch := CH_A + 4;
+                    when 16 => ch := CH_A + 13;
+                    when 17 => ch := CH_A + 18;
+                    when 18 => ch := CH_A + 14;
+                    when 19 => ch := CH_A + 17;
+                    when 20 => ch := CH_SPACE;
+                    when 21 => ch := CH_A + 4;
+                    when 22 => ch := CH_A + 17;
+                    when 23 => ch := CH_A + 17;
+                    when 24 => ch := CH_A + 14;
+                    when 25 => ch := CH_A + 17;
+                    when others => ch := CH_SPACE;
+                end case;
+                use_text := true;
+            end if;
+
 
             -- Applica testo sopra tutto
             if use_text and ch /= CH_SPACE then

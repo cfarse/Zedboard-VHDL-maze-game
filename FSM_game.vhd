@@ -49,10 +49,11 @@ entity fsm_game is
         mpu_sda      : inout std_logic;
 
         -- Uscite verso il connettore HDMI (ADV7511)
-        hdmi_clk_p   : out std_logic;
-        hdmi_clk_n   : out std_logic;
-        hdmi_d_p     : out std_logic_vector(2 downto 0);
-        hdmi_d_n     : out std_logic_vector(2 downto 0);
+        hdmi_clk   : out std_logic;
+        hdmi_de     : out std_logic;
+        hdmi_hsync     : out std_logic;
+        hdmi_vsync     : out std_logic;
+        hdmi_data      : out std_logic_vector(15 downto 0);
         hdmi_scl     : inout std_logic;
         hdmi_sda     : inout std_logic;
         hdmi_hpd     : in  std_logic;
@@ -109,6 +110,7 @@ architecture rtl of fsm_game is
     signal mpu_start_read : std_logic := '0';
     signal mpu_busy       : std_logic;
     signal mpu_error      : std_logic;
+    signal mpu_sensor_fault : std_logic;
 
     signal acc_x_s  : signed(15 downto 0);
     signal acc_y_s  : signed(15 downto 0);
@@ -220,7 +222,8 @@ begin
             acc_z      => acc_z_s,
             temp       => temp_s,
             busy       => mpu_busy,
-            error_flag => mpu_error
+            error_flag => mpu_error,
+            sensor_fault => mpu_sensor_fault
         );
 
     ------------------------------------------------------------------
@@ -255,7 +258,7 @@ begin
             sec_cnt    <= 0;
             timer_secs <= GAME_TIME;
         elsif rising_edge(clk) then
-            if state = GS_PLAYING then
+            if state = GS_PLAYING and mpu_sensor_fault = '0' then
                 if sec_cnt = ONE_SEC_CNT - 1 then
                     sec_cnt <= 0;
                     if timer_secs > 0 then
@@ -311,7 +314,7 @@ begin
                 ------------------------------------------------------
                 when GS_IDLE =>
                     ball_enable <= '0';
-                    if btn_start_p = '1' then
+                    if btn_start_p = '1' and mpu_sensor_fault = '0' then
                         state        <= GS_LEVEL;
                         level_select <= "00";
                     end if;
@@ -339,7 +342,7 @@ begin
                     end if;
 
                     -- Start: inizia il livello
-                    if btn_start_p = '1' then
+                    if btn_start_p = '1' and mpu_sensor_fault = '0' then
                         state       <= GS_PLAYING;
                         timer_secs  <= GAME_TIME;
                         ball_reset  <= '1';     -- reset posizione pallina
@@ -428,13 +431,15 @@ begin
             winner       => winner,        -- <-- NUOVO
             level_won    => level_won,
             -- HDMI
-            hdmi_clk_p   => hdmi_clk_p,
-            hdmi_clk_n   => hdmi_clk_n,
-            hdmi_d_p     => hdmi_d_p,
-            hdmi_d_n     => hdmi_d_n,
+            hdmi_clk   => hdmi_clk,
+            hdmi_de     => hdmi_de,
+            hdmi_hsync     => hdmi_hsync,
+            hdmi_vsync     => hdmi_vsync,
+            hdmi_data      => hdmi_data,
             hdmi_scl     => hdmi_scl,
             hdmi_sda     => hdmi_sda,
-            hdmi_hpd     => hdmi_hpd
+            hdmi_hpd     => hdmi_hpd,
+            sensor_fault => mpu_sensor_fault
         );
 
     ------------------------------------------------------------------

@@ -9,26 +9,29 @@ entity i2c_protocol is
         TIMEOUT_CYCLES : integer := 200_000
     );
     Port(
-        clk         : in std_logic;
-        rst         : in std_logic;
-        start       : in std_logic;
-        addr        : in std_logic_vector(6 downto 0);
-        data_in     : in std_logic_vector(7 downto 0);
-        rw          : in std_logic;
-        more_data   : in std_logic;
-        restart_with_read : in std_logic;   -- NUOVO: richiede repeated start per lettura
-        scl         : inout std_logic;
-        sda         : inout std_logic;
-        done        : out std_logic;
-        ack_err     : out std_logic;
-        timeout_err : out std_logic;
-        data_out    : out std_logic_vector(7 downto 0);
-        busy        : out std_logic
+        clk               : in    std_logic;
+        rst               : in    std_logic;
+        start             : in    std_logic;
+        addr              : in    std_logic_vector(6 downto 0);
+        data_in           : in    std_logic_vector(7 downto 0);
+        rw                : in    std_logic;
+        more_data         : in    std_logic;
+        restart_with_read : in    std_logic;
+        tx_byte_2         : in    std_logic_vector(7 downto 0);
+        tx_byte_2_en      : in    std_logic;
+        scl               : inout std_logic;
+        sda               : inout std_logic;
+        done              : out   std_logic;
+        ack_err           : out   std_logic;
+        timeout_err       : out   std_logic;
+        data_out          : out   std_logic_vector(7 downto 0);
+        busy              : out   std_logic
     );
 end i2c_protocol;
 
 architecture Behavioral of i2c_protocol is
-    type state_type is (IDLE, START_COND, REPEATED_START, TX_ADDR, ACK_ADDR, TX_DATA, ACK_DATA, RX_DATA, ACK_MSTR, STOP_COND);
+    type state_type is (IDLE, START_COND, REPEATED_START, TX_ADDR, ACK_ADDR,
+                        TX_DATA, ACK_DATA, RX_DATA, ACK_MSTR, STOP_COND);
     signal state : state_type := IDLE;
 
     constant Q_DIV : integer := (SYS_CLK_FREQ + I2C_FREQ*2) / (I2C_FREQ * 4);
@@ -47,6 +50,9 @@ architecture Behavioral of i2c_protocol is
     signal start_d       : std_logic := '0';
     signal start_edge    : std_logic := '0';
     signal start_latched : std_logic := '0';
+    signal start_pending : std_logic := '0';   -- NUOVO: latcha il fronte di start
+
+    signal byte2_pending : std_logic := '0';
 
     signal timeout_cnt     : integer range 0 to TIMEOUT_CYCLES := 0;
     signal timeout_err_int : std_logic := '0';
@@ -74,10 +80,17 @@ begin
             start_d <= '0';
             start_edge <= '0';
             start_latched <= '0';
+            start_pending <= '0';
+            byte2_pending <= '0';
             timeout_cnt <= 0;
         elsif rising_edge(clk) then
             start_edge <= start and not start_d;
             start_d <= start;
+
+            -- NUOVO: latch del fronte di start finche' non viene consumato in IDLE
+            if start_edge = '1' then
+                start_pending <= '1';
+            end if;
 
             if q_cnt = Q_DIV - 1 then
                 q_cnt <= 0;
@@ -108,6 +121,7 @@ begin
                 busy <= '0';
                 timeout_err_int <= '1';
                 start_latched <= '0';
+                byte2_pending <= '0';
             else
                 if state = IDLE then
                     start_latched <= '0';
@@ -130,9 +144,12 @@ begin
                             scl_int <= '1';
                             busy <= '0';
                             ack_err_int <= '0';
-                            if start_edge = '1' then
+                            -- MODIFICATO: consuma start_pending invece di start_edge
+                            if start_pending = '1' then
+                                start_pending <= '0';
                                 busy <= '1';
                                 tx_reg <= addr & rw;
+                                byte2_pending <= tx_byte_2_en;
                                 state <= START_COND;
                                 phase <= 0;
                             end if;
@@ -159,7 +176,6 @@ begin
                             elsif phase = 2 then
                                 scl_int <= '0';
                             elsif phase = 3 then
-                                -- Forza lettura (bit rw = '1') quando arriviamo da restart_with_read
                                 tx_reg <= addr & '1';
                                 bit_cnt <= 7;
                                 state <= TX_ADDR;
@@ -231,16 +247,23 @@ begin
                                 end if;
                             elsif phase = 3 then
                                 scl_int <= '0';
-                                done <= '1';
-                                -- MODIFICA: supporto a restart_with_read
-                                if restart_with_read = '1' then
-                                    state <= REPEATED_START;
-                                elsif start_latched = '1' then
-                                    state <= TX_DATA;
-                                    tx_reg <= data_in;
+                                if byte2_pending = '1' then
+                                    byte2_pending <= '0';
+                                    tx_reg  <= tx_byte_2;
                                     bit_cnt <= 7;
+                                    state   <= TX_DATA;
                                 else
-                                    state <= STOP_COND;
+                                    done <= '1';
+                                    if restart_with_read = '1' then
+                                        state <= REPEATED_START;
+                                    elsif start_latched = '1' then
+                                        state <= TX_DATA;
+                                        tx_reg <= data_in;
+                                        bit_cnt <= 7;
+                                        start_pending <= '0';
+                                    else
+                                        state <= STOP_COND;
+                                    end if;
                                 end if;
                             end if;
 
@@ -276,7 +299,7 @@ begin
                                     state <= RX_DATA;
                                     bit_cnt <= 7;
                                 else
-                                    state <= STOP_COND;   -- STOP dopo l'ultimo byte
+                                    state <= STOP_COND;
                                 end if;
                             end if;
 

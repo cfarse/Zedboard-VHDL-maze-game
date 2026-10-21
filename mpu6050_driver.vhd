@@ -17,12 +17,16 @@ entity mpu6050_driver is
         acc_z      : out signed(15 downto 0);
         temp       : out signed(15 downto 0);
         busy       : out std_logic;
-        error_flag : out std_logic
+        error_flag : out std_logic;
+        sensor_fault : out std_logic
     );
 end mpu6050_driver;
 
 architecture Behavioral of mpu6050_driver is
 
+    constant ERR_THRESHOLD       : integer := 10;
+    
+    signal err_count             : integer range 0 to ERR_THRESHOLD := 0;
     signal i2c_start             : std_logic := '0';
     signal i2c_rw                : std_logic := '0';
     signal i2c_data_in           : std_logic_vector(7 downto 0) := (others => '0');
@@ -83,6 +87,9 @@ begin
             acc_x <= (others=>'0'); acc_y <= (others=>'0'); acc_z <= (others=>'0');
             temp <= (others=>'0');
             gyro_x <= (others=>'0'); gyro_y <= (others=>'0'); gyro_z <= (others=>'0');
+            err_count <= 0;
+            sensor_fault <= '0';
+
         elsif rising_edge(clk) then
             -- NUOVO: rilevamento fronte di salita su timeout_err
             i2c_timeout_err_d <= i2c_timeout_err;
@@ -147,7 +154,6 @@ begin
                             if i2c_ack_err = '1' then
                                 state <= ERR_STATE;
                             else
-                                i2c_rw   <= '1';
                                 i2c_more <= '1';
                                 byte_counter <= 0;
                                 state <= RD_LOOP;
@@ -185,6 +191,8 @@ begin
                             gyro_x <= signed(buffer_data(47 downto 32));
                             gyro_y <= signed(buffer_data(31 downto 16));
                             gyro_z <= signed(buffer_data(15 downto 0));
+                            err_count <= 0;
+                            sensor_fault <= '0';
                             busy <= '0';
                             i2c_restart_with_read <= '0';
                             state <= IDLE;
@@ -195,6 +203,12 @@ begin
                         i2c_start <= '0';
                         i2c_restart_with_read <= '0';
                         i2c_tx_byte_2_en <= '0';
+                        if err_count < ERR_THRESHOLD then
+                            err_count <= err_count + 1;
+                        end if;
+                        if err_count >= ERR_THRESHOLD then
+                            sensor_fault <= '1';
+                        end if;
                         if i2c_busy = '0' then
                             busy <= '0';
                             state <= IDLE;
