@@ -126,7 +126,6 @@ architecture rtl of fsm_game is
     ------------------------------------------------------------------
     -- Joystick edge detection
     ------------------------------------------------------------------
-    signal joy_left_d, joy_right_d   : std_logic := '0';
     signal joy_left_p, joy_right_p   : std_logic := '0';
 
     ------------------------------------------------------------------
@@ -194,15 +193,25 @@ begin
     ------------------------------------------------------------------
     -- Edge detection del joystick
     ------------------------------------------------------------------
-    process(clk)
-    begin
-        if rising_edge(clk) then
-            joy_left_d  <= joy_left;
-            joy_right_d <= joy_right;
-            joy_left_p  <= joy_left  and not joy_left_d;
-            joy_right_p <= joy_right and not joy_right_d;
-        end if;
-    end process;
+    u_deb_joy_left : entity work.Debounce
+        port map(
+            clk => clk,
+            rst => rst_sync,
+            btn_in => joy_left,
+            btn_out => open,
+            btn_pressed => joy_left_p,
+            btn_released => open
+        );
+
+    u_deb_joy_right : entity work.Debounce
+        port map(
+            clk => clk,
+            rst => rst_sync,
+            btn_in => joy_right,
+            btn_out => open,
+            btn_pressed => joy_right_p,
+            btn_released => open
+        );
 
     ------------------------------------------------------------------
     -- Driver MPU6050 (bus I2C dedicato)

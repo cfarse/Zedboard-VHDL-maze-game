@@ -261,6 +261,7 @@ begin
                                         tx_reg <= data_in;
                                         bit_cnt <= 7;
                                         start_pending <= '0';
+                                        start_latched <= '0';
                                     else
                                         state <= STOP_COND;
                                     end if;

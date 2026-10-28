@@ -61,7 +61,7 @@ begin
                 sync_ff(1) <= sync_ff(0);
 
                 -- 2) Contatore di stabilità
-                if sync_ff(1) /= btn_stable then
+                if sync_ff(1) = btn_stable then
                     -- Input diverso dallo stato stabile: riparti da zero
                     counter <= (others => '0');
                 elsif counter(COUNTER_SIZE) = '0' then
