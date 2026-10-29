@@ -121,6 +121,7 @@ begin
                 busy <= '0';
                 timeout_err_int <= '1';
                 start_latched <= '0';
+                start_pending <= '0';
                 byte2_pending <= '0';
             else
                 if state = IDLE then

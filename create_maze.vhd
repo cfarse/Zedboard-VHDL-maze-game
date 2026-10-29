@@ -293,7 +293,7 @@ architecture rtl of create_maze is
     signal blink_on  : std_logic := '1';
 
     ------------------------------------------------------------------
-    -- Copie sincronizzate nel dominio clk_pixel (1-FF)
+    -- Copie sincronizzate nel dominio clk_pixel (2-FF)
     --   Tutti questi segnali sono quasi-statici rispetto a clk_pixel:
     --   cambiano al massimo ogni ~10 ms (≈ 250.000 cicli pixel).
     --   Il sincronizzatore a 2 flip-flop è ampiamente sufficiente
@@ -326,6 +326,24 @@ architecture rtl of create_maze is
     signal target_py_s    : integer range 0 to 479 := 109;
     signal target_r_s     : integer range 3 to 16 := 12;
 
+
+    --second FF
+    signal game_state_meta : std_logic_vector(1 downto 0) := "00";
+    signal level_select_meta : std_logic_vector(1 downto 0) := "00";
+    signal physics_mode_meta : std_logic_vector(1 downto 0) := "00";
+    signal colorblind_meta   : std_logic := '0';
+    signal ball_x_meta      : integer range 0 to 639 := 96;
+    signal ball_y_meta       : integer range 0 to 479 := 109;
+    signal ball_vx_meta      : integer range -4 to 4 := 0;
+    signal ball_vy_meta      : integer range -4 to 4 := 0;
+    signal ball_ax_meta      : integer range -1 to 1 := 0;
+    signal ball_ay_meta      : integer range -1 to 1 := 0;
+    signal timer_secs_meta   : integer range 0 to 99 := 0;
+    signal winner_meta       : std_logic := '0';
+    signal blink_on_meta     : std_logic := '1';
+    signal sensor_fault_meta : std_logic := '0';
+    signal level_won_meta    : std_logic := '0';
+
 begin
 
     level_won <= level_won_int;
@@ -356,16 +374,14 @@ begin
         );
 
 
-    process (clk_pixel_int, rst)
+    process (clk_pixel_int)
     begin
-        if rst = '1' then
-            rst_px_meta <= '1';
-            rst_px_sync <= '1';
-        elsif rising_edge(clk_pixel_int) then
-            rst_px_meta <= '0';
+        if rising_edge(clk_pixel_int) then
+            rst_px_meta <= rst;
             rst_px_sync <= rst_px_meta;
         end if;
     end process;
+
     ------------------------------------------------------------------
     -- Tick 100 Hz (dominio clk)
     ------------------------------------------------------------------
@@ -627,6 +643,22 @@ begin
     begin
         if rising_edge(clk_pixel_int) then
             if rst_px_sync = '1' then
+                game_state_meta   <= "00";
+                level_select_meta <= "00";
+                physics_mode_meta <= "00";
+                colorblind_meta   <= '0';
+                ball_x_meta       <= 96;
+                ball_y_meta       <= MAZE_Y_START + 61;
+                ball_vx_meta      <= 0;
+                ball_vy_meta      <= 0;
+                ball_ax_meta      <= 0;
+                ball_ay_meta      <= 0;
+                timer_secs_meta   <= 0;
+                winner_meta       <= '0';
+                blink_on_meta     <= '1';
+                sensor_fault_meta <= '0';
+                level_won_meta    <= '0';    
+
                 game_state_s   <= "00";
                 level_select_s <= "00";
                 physics_mode_s <= "00";
@@ -643,21 +675,37 @@ begin
                 sensor_fault_s <= '0';
                 level_won_s    <= '0';
             else
-                game_state_s   <= game_state;
-                level_select_s <= level_select;
-                physics_mode_s <= physics_mode;
-                colorblind_s   <= colorblind;
-                ball_x_s       <= ball_x;
-                ball_y_s       <= ball_y;
-                ball_vx_s      <= ball_vx;
-                ball_vy_s      <= ball_vy;
-                ball_ax_s      <= ball_ax;
-                ball_ay_s      <= ball_ay;
-                timer_secs_s   <= timer_secs;
-                winner_s       <= winner;
-                blink_on_s     <= blink_on;
-                sensor_fault_s <= sensor_fault;
-                level_won_s    <= level_won_int;
+                game_state_meta   <= game_state;
+                level_select_meta <= level_select;
+                physics_mode_meta <= physics_mode;
+                colorblind_meta   <= colorblind;
+                ball_x_meta       <= ball_x;
+                ball_y_meta       <= ball_y;
+                ball_vx_meta      <= ball_vx;
+                ball_vy_meta      <= ball_vy;
+                ball_ax_meta      <= ball_ax;
+                ball_ay_meta      <= ball_ay;
+                timer_secs_meta   <= timer_secs;
+                winner_meta       <= winner;
+                blink_on_meta     <= blink_on;
+                sensor_fault_meta <= sensor_fault;
+                level_won_meta    <= level_won_int;
+
+                game_state_s   <= game_state_meta;
+                level_select_s <= level_select_meta;
+                physics_mode_s <= physics_mode_meta;
+                colorblind_s   <= colorblind_meta;
+                ball_x_s       <= ball_x_meta;
+                ball_y_s       <= ball_y_meta;
+                ball_vx_s      <= ball_vx_meta;
+                ball_vy_s      <= ball_vy_meta;
+                ball_ax_s      <= ball_ax_meta;
+                ball_ay_s      <= ball_ay_meta;
+                timer_secs_s   <= timer_secs_meta;
+                winner_s       <= winner_meta;
+                blink_on_s     <= blink_on_meta;
+                sensor_fault_s <= sensor_fault_meta;
+                level_won_s    <= level_won_meta;
             end if;
         end if;
     end process;

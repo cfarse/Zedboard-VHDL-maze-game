@@ -175,13 +175,10 @@ begin
         );
 
     
-    process(clk_pixel, rst_int)
+    process(clk_pixel)
     begin
-        if rst_int = '1' then
-            rst_pixel_meta <= '1';
-            rst_pixel_sync <= '1';
-        elsif rising_edge(clk_pixel) then
-            rst_pixel_meta <= '0';
+        if rising_edge(clk_pixel) then
+            rst_pixel_meta <= rst_int;
             rst_pixel_sync <= rst_pixel_meta;
         end if;
     end process;
